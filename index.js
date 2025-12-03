@@ -9,15 +9,13 @@ const port = process.env.PORT || 3000;
 
 // --- Middleware ---
 app.use(cors());
-app.use(express.json({ limit: '2mb' })); // High limit for large XML files
+app.use(express.json({ limit: '2mb' }));
 
 // --- Auth Middleware ---
 app.use((req, res, next) => {
-    // Skip auth for health check
     if (req.path === '/health') return next();
 
     const expectedKey = process.env.ACTION_API_KEY;
-    // Skip auth if no key is configured (local dev)
     if (!expectedKey) return next();
 
     const authHeader = req.headers.authorization || '';
@@ -27,15 +25,6 @@ app.use((req, res, next) => {
     next();
 });
 
-// --- BPMN Linter Setup ---
-const moddle = new BpmnModdle();
-const linter = new Linter({
-    config: {
-        extends: 'bpmnlint:recommended' // Loads all recommended rules
-    },
-    resolver: new NodeResolver()
-});
-
 // Map linter categories to specific severity strings
 const SEVERITY_MAP = {
     'error': 'error',
@@ -43,7 +32,6 @@ const SEVERITY_MAP = {
     'info': 'info'
 };
 
-// Optional: Override specific rules if needed (currently minimal)
 const RULE_SEVERITY_OVERRIDE = {
     'no-bpmndi': 'warning'
 };
@@ -60,20 +48,25 @@ app.post('/lint-bpmn', async (req, res) => {
     }
 
     try {
+        const moddle = new BpmnModdle();
+        const linter = new Linter({
+            config: {
+                extends: 'bpmnlint:recommended'
+            },
+            resolver: new NodeResolver()
+        });
+
         // 1. Parse XML
         const { rootElement } = await moddle.fromXML(bpmnXml);
 
-        // 2. Lint the root element (Definitions)
-        // Passing rootElement ensures global rules (like no-bpmndi) work correctly.
+        // 2. Lint
         const lintResults = await linter.lint(rootElement);
 
-        // 3. Format results for GPT
+        // 3. Format results
         const issues = [];
 
-        // lintResults structure: { "rule-name": [ { id, message, category, ... } ] }
         for (const [ruleName, reports] of Object.entries(lintResults)) {
             for (const report of reports) {
-                // Determine severity: Override > Category > Default
                 let severity = RULE_SEVERITY_OVERRIDE[ruleName];
                 if (!severity) {
                     severity = SEVERITY_MAP[report.category] || 'warning';
@@ -81,15 +74,13 @@ app.post('/lint-bpmn', async (req, res) => {
 
                 issues.push({
                     rule: ruleName,
-                    id: report.id || 'root', // Some global errors have no element ID
+                    id: report.id || 'root',
                     message: report.message,
                     severity
                 });
             }
         }
 
-        // 4. Send Response
-        // 'status' helps GPT quickly understand if action is needed
         return res.json({
             status: issues.some(i => i.severity === 'error') ? 'error' : 'ok',
             issues: issues
