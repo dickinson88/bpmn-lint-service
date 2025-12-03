@@ -7,128 +7,103 @@ import BpmnModdle from 'bpmn-moddle';
 const app = express();
 const port = process.env.PORT || 3000;
 
-// --- middlewares ---
+// --- Middleware ---
 app.use(cors());
-app.use(express.json({ limit: '5mb' }));
+app.use(express.json({ limit: '2mb' })); // High limit for large XML files
 
-// --- auth middleware (for GPT Action) ---
+// --- Auth Middleware ---
 app.use((req, res, next) => {
-    const expectedKey = process.env.ACTION_API_KEY;
+    // Skip auth for health check
+    if (req.path === '/health') return next();
 
-    // if no key is set, skip auth (local testing)
-    if (!expectedKey) {
-        return next();
-    }
+    const expectedKey = process.env.ACTION_API_KEY;
+    // Skip auth if no key is configured (local dev)
+    if (!expectedKey) return next();
 
     const authHeader = req.headers.authorization || '';
-    const expectedHeader = `Bearer ${expectedKey}`;
-
-    if (authHeader !== expectedHeader) {
+    if (authHeader !== `Bearer ${expectedKey}`) {
         return res.status(401).json({ error: 'Unauthorized' });
     }
-
     next();
 });
 
-// --- bpmnlint setup ---
+// --- BPMN Linter Setup ---
 const moddle = new BpmnModdle();
-
-// severity map for classification
-const SEVERITY_MAP = {
-    // high severity
-    'end-event-required': 'error',
-    'start-event-required': 'error',
-    'no-disconnected': 'error',
-    'no-implicit-split': 'error',
-    'no-implicit-join': 'error',
-    'no-duplicate-sequence-flows': 'error',
-    'no-bpmndi': 'warning',
-    'label-required': 'warning',
-    '__default': 'warning'
-};
-
 const linter = new Linter({
     config: {
-        extends: 'bpmnlint:recommended'
+        extends: 'bpmnlint:recommended' // Loads all recommended rules
     },
     resolver: new NodeResolver()
 });
 
-// health check
-app.get('/health', (req, res) => {
-    res.json({ status: 'ok' });
-});
+// Map linter categories to specific severity strings
+const SEVERITY_MAP = {
+    'error': 'error',
+    'warn': 'warning',
+    'info': 'info'
+};
 
-// --- main lint endpoint ---
+// Optional: Override specific rules if needed (currently minimal)
+const RULE_SEVERITY_OVERRIDE = {
+    'no-bpmndi': 'warning'
+};
+
+// --- Routes ---
+
+app.get('/health', (req, res) => res.json({ status: 'ok' }));
+
 app.post('/lint-bpmn', async (req, res) => {
     const { bpmnXml } = req.body || {};
 
     if (!bpmnXml || typeof bpmnXml !== 'string') {
-        return res.status(400).json({
-            error: 'Missing bpmnXml string in JSON body'
-        });
+        return res.status(400).json({ error: 'Missing bpmnXml string' });
     }
 
     try {
-        const { rootElement, rootElements } = await moddle.fromXML(bpmnXml);
+        // 1. Parse XML
+        const { rootElement } = await moddle.fromXML(bpmnXml);
 
-        // extract processes, ignore collaborations
-        const processes = (rootElements || []).filter(e => e.$type === 'bpmn:Process');
-        const targets = processes.length ? processes : [rootElement];
+        // 2. Lint the root element (Definitions)
+        // Passing rootElement ensures global rules (like no-bpmndi) work correctly.
+        const lintResults = await linter.lint(rootElement);
 
-        const reports = {};
-
-        for (const element of targets) {
-            const r = await linter.lint(element);
-
-            // Filter out duplicate rule entries — bpmnlint sometimes repeats issues
-            for (const [rule, issues] of Object.entries(r)) {
-                if (!reports[rule]) reports[rule] = [];
-
-                // Add issues only once per element ID
-                for (const issue of issues) {
-                    const alreadyExists = reports[rule].some(i => i.id === issue.id && i.message === issue.message);
-                    if (!alreadyExists) {
-                        reports[rule].push(issue);
-                    }
-                }
-            }
-        }
-
-        // Flatten reports to issues[]
+        // 3. Format results for GPT
         const issues = [];
 
-        for (const [ruleName, ruleIssues] of Object.entries(reports)) {
-            for (const issue of ruleIssues) {
-                const severity = issue.category || SEVERITY_MAP[ruleName] || SEVERITY_MAP['__default'];
+        // lintResults structure: { "rule-name": [ { id, message, category, ... } ] }
+        for (const [ruleName, reports] of Object.entries(lintResults)) {
+            for (const report of reports) {
+                // Determine severity: Override > Category > Default
+                let severity = RULE_SEVERITY_OVERRIDE[ruleName];
+                if (!severity) {
+                    severity = SEVERITY_MAP[report.category] || 'warning';
+                }
+
                 issues.push({
                     rule: ruleName,
-                    id: issue.id,
-                    message: issue.message || '',
+                    id: report.id || 'root', // Some global errors have no element ID
+                    message: report.message,
                     severity
                 });
             }
         }
 
-        // Deduplicate globally by (rule, id, message)
-        const uniqueIssues = issues.filter(
-            (v, i, a) => a.findIndex(t => t.rule === v.rule && t.id === v.id && t.message === v.message) === i
-        );
-
+        // 4. Send Response
+        // 'status' helps GPT quickly understand if action is needed
         return res.json({
-            issues: uniqueIssues,
-            rawReports: reports
+            status: issues.some(i => i.severity === 'error') ? 'error' : 'ok',
+            issues: issues
         });
-    } catch (err) {
-        console.error('Lint error:', err);
 
-        return res.status(500).json({
-            error: 'Linting failed',
+    } catch (err) {
+        console.error('Lint processing error:', err);
+        return res.status(400).json({
+            error: 'Failed to process BPMN',
             details: err.message
         });
     }
 });
 
 app.listen(port, () => {
-    console.log(`✅ BPMN lint service listening on port ${port}`);
+    console.log(`BPMN lint service listening on port ${port}`);
 });
