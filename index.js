@@ -41,45 +41,57 @@ app.use((req, res, next) => {
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
 app.post('/lint-bpmn', async (req, res) => {
+    console.log('content-type:', req.headers['content-type']);
+    console.log('body keys:', Object.keys(req.body || {}));
+    console.log('bpmnXml first 80:', JSON.stringify((req.body?.bpmnXml ?? '').slice(0, 80)));
+    console.log('bpmnXml last 80:', JSON.stringify((req.body?.bpmnXml ?? '').slice(-80)));
+    console.log('bpmnXml length:', (req.body?.bpmnXml ?? '').length);
+
     const { bpmnXml } = req.body || {};
 
-    if (!bpmnXml || typeof bpmnXml !== 'string') {
-        return res.status(400).json({ error: 'Missing bpmnXml string' });
+    if (typeof bpmnXml !== 'string' || !bpmnXml.trim()) {
+        return res.status(400).json({ status: 'error', error: 'Missing bpmnXml string' });
     }
 
+    let rootElement;
     try {
-        const { rootElement } = await moddle.fromXML(bpmnXml);
-        const lintResults = await linter.lint(rootElement);
-
-        console.log('rootElement.$type:', rootElement?.$type);
-        console.log('has rootElements:', Array.isArray(rootElement?.rootElements), 'len:', rootElement?.rootElements?.length);
-
-        const issues = Object.entries(lintResults).map(([ruleName, reports]) => ({
-            rule: ruleName,
-            reports: reports.map(report => ({
-                id: report.id,
-                message: report.message,
-                documentationLink: report.meta?.documentation?.url,
-                category: report.category
-            }))
-        }));
-
-        const hasBlocking = issues.some(issue =>
-            issue.reports.some(r => BLOCKING_CATEGORIES.has(r.category))
-        );
-
-        return res.json({
-            status: hasBlocking ? 'error' : 'ok',
-            issues
-        });
-
+        const parsed = await moddle.fromXML(bpmnXml);
+        rootElement = parsed.rootElement;
     } catch (err) {
-        console.error('Lint processing error:', err);
         return res.status(400).json({
-            error: 'Failed to process BPMN',
-            details: err.message
+            status: 'error',
+            error: 'Invalid BPMN XML: failed to parse document as <bpmn:Definitions>',
+            details: err?.message ?? String(err)
         });
     }
+
+    if (rootElement?.$type !== 'bpmn:Definitions' || !Array.isArray(rootElement.rootElements)) {
+        return res.status(400).json({
+            status: 'error',
+            error: 'Invalid BPMN XML: <bpmn:Definitions> parsed without rootElements',
+            rootType: rootElement?.$type
+        });
+    }
+
+    const lintResults = await linter.lint(rootElement);
+
+    const issues = Object.entries(lintResults).map(([ruleName, reports]) => ({
+        rule: ruleName,
+        reports: reports.map(r => ({
+            id: r.id,
+            message: r.message,
+            documentationLink: r.meta?.documentation?.url,
+            category: r.category
+        }))
+    }));
+    const hasBlocking = issues.some(issue =>
+        issue.reports.some(r => BLOCKING_CATEGORIES.has(r.category))
+    );
+
+    return res.json({
+        status: hasBlocking ? 'error' : 'ok',
+        issues
+    });
 });
 
 app.listen(port, () => {
