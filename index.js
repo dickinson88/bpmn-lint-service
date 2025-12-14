@@ -6,6 +6,16 @@ import BpmnModdle from 'bpmn-moddle';
 
 const app = express();
 const port = process.env.PORT || 3000;
+const moddle = new BpmnModdle();
+const linter = new Linter({
+    config: {
+        extends: 'bpmnlint:recommended'
+    },
+    rules: {
+        "label-required": "off"
+    },
+    resolver: new NodeResolver()
+});
 
 // --- Middleware ---
 app.use(cors());
@@ -25,17 +35,6 @@ app.use((req, res, next) => {
     next();
 });
 
-// Map linter categories to specific severity strings
-const SEVERITY_MAP = {
-    'error': 'error',
-    'warn': 'warning',
-    'info': 'info'
-};
-
-const RULE_SEVERITY_OVERRIDE = {
-    'no-bpmndi': 'warning'
-};
-
 // --- Routes ---
 
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
@@ -48,42 +47,26 @@ app.post('/lint-bpmn', async (req, res) => {
     }
 
     try {
-        const moddle = new BpmnModdle();
-        const linter = new Linter({
-            config: {
-                extends: 'bpmnlint:recommended'
-            },
-            resolver: new NodeResolver()
-        });
-
-        // 1. Parse XML
         const { rootElement } = await moddle.fromXML(bpmnXml);
-
-        // 2. Lint
         const lintResults = await linter.lint(rootElement);
 
-        // 3. Format results
-        const issues = [];
+        const issues = Object.entries(lintResults).map(([ruleName, reports]) => ({
+            rule: ruleName,
+            reports: reports.map(report => ({
+                id: report.id,
+                message: report.message,
+                documentationLink: report.meta?.documentation?.url,
+                category: report.category
+            }))
+        }));
 
-        for (const [ruleName, reports] of Object.entries(lintResults)) {
-            for (const report of reports) {
-                let severity = RULE_SEVERITY_OVERRIDE[ruleName];
-                if (!severity) {
-                    severity = SEVERITY_MAP[report.category] || 'warning';
-                }
-
-                issues.push({
-                    rule: ruleName,
-                    id: report.id || 'root',
-                    message: report.message,
-                    severity
-                });
-            }
-        }
+        const hasError = issues.some(issue =>
+            issue.reports.some(r => r.category === 'error')
+        );
 
         return res.json({
-            status: issues.some(i => i.severity === 'error') ? 'error' : 'ok',
-            issues: issues
+            status: hasError ? 'error' : 'ok',
+            issues
         });
 
     } catch (err) {
