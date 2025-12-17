@@ -1,6 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import multer from 'multer';
+import zlib from 'node:zlib';
 import { Linter } from 'bpmnlint';
 import NodeResolver from 'bpmnlint/lib/resolver/node-resolver.js';
 import BpmnModdle from 'bpmn-moddle';
@@ -52,24 +53,30 @@ app.post('/lint-bpmn', upload.single('file'), async (req, res) => {
     const ct = req.headers['content-type'] || '';
     console.log('content-type:', ct);
 
-    // 1) Pokud přišel soubor (multipart/form-data)
     let bpmnXml = null;
+
+    // 1) multipart file
     if (req.file?.buffer) {
         bpmnXml = req.file.buffer.toString('utf8');
-        console.log('received file:', req.file.originalname, 'size:', req.file.size);
     }
 
-    // 2) Jinak fallback na JSON body { bpmnXml }
-    if (!bpmnXml) {
-        console.log('body keys:', Object.keys(req.body || {}));
-        bpmnXml = req.body?.bpmnXml;
+    // 2) JSON raw xml
+    if (!bpmnXml && typeof req.body?.bpmnXml === 'string') {
+        bpmnXml = req.body.bpmnXml;
+    }
+
+    // 3) JSON gzip+base64
+    if (!bpmnXml && typeof req.body?.bpmnGzipBase64 === 'string') {
+        try {
+            const gzBuf = Buffer.from(req.body.bpmnGzipBase64, 'base64');
+            bpmnXml = zlib.gunzipSync(gzBuf).toString('utf8');
+        } catch (e) {
+            return res.status(400).json({ status: 'error', error: 'Invalid bpmnGzipBase64', details: String(e?.message ?? e) });
+        }
     }
 
     if (typeof bpmnXml !== 'string' || !bpmnXml.trim()) {
-        return res.status(400).json({
-            status: 'error',
-            error: 'Missing BPMN input. Send multipart file field "file" OR JSON { bpmnXml }.'
-        });
+        return res.status(400).json({ status: 'error', error: 'Missing BPMN input (file OR bpmnXml OR bpmnGzipBase64).' });
     }
 
     let rootElement;
