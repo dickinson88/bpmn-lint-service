@@ -8,9 +8,10 @@
     "start": "node index.js"
   },
   "dependencies": {
-    "bpmnlint": "^11.7.1",
     "bpmn-moddle": "^9.0.0",
+    "bpmnlint": "^11.7.1",
+    "cors": "^2.8.5",
     "express": "^4.19.0",
-    "cors": "^2.8.5"
+    "multer": "^2.0.2"
   }
 }
